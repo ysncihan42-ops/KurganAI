@@ -1,130 +1,221 @@
 import streamlit as st
 import yfinance as yf
-# ... diğerleri ...
-import requests # Bu kütüphane bazen kimlik doğrulamada işe yarar
+import pandas as pd
+import math
+import time
 
 # --- KONFİGÜRASYON ---
-st.set_page_config(page_title="Kurgan AI - Finansal Terminal", layout="wide")
+st.set_page_config(
+    page_title="Kurgan AI - Finansal Terminal",
+    layout="wide",
+    page_icon="🛡️"
+)
 
-# --- VERİ ÇEKME FONKSİYONLARI ---
+# --- CACHE (HIZ + RATE LIMIT KORUMA) ---
+@st.cache_data(ttl=600)
 def fetch_financial_data(ticker_symbol):
     ticker_id = f"{ticker_symbol.upper()}.IS"
-    
-    # Yeni yfinance sürümünde artık session tanımlamamıza gerek yok.
-    # Kütüphane curl_cffi yüklüyse kendisi otomatik hallediyor.
-    ticker = yf.Ticker(ticker_id)
-    
+
     try:
-        # En hızlı veri alma yöntemi 'fast_info'dur
-        fast = ticker.fast_info
-        price = fast.get('last_price')
-        
-        # Finansal veriler (EPS, Defter Değeri vb.) için info'yu deneyelim
-        info = ticker.info
-        
-        if not info or len(info) < 5:
-            if price:
-                return {
-                    "symbol": ticker_symbol.upper(),
-                    "price": price,
-                    "eps": 0.0,
-                    "book_value_ps": 0.0,
-                    "pe": 0,
-                    "pb": 0
-                }, "⚠️ Yahoo bazı verileri kısıtlı gönderiyor. Fiyat günceldir."
-            
-            return None, "🚫 Şu an veri çekilemiyor. Lütfen birkaç dakika sonra deneyin."
+        ticker = yf.Ticker(ticker_id)
+
+        # 1️⃣ FİYAT - ÇOK KAYNAKLI (EN STABİL YÖNTEM)
+        price = None
+
+        # Önce fast_info
+        try:
+            fast = ticker.fast_info
+            price = fast.get("last_price") or fast.get("regular_market_price")
+        except:
+            pass
+
+        # 2. fallback -> info
+        if not price:
+            try:
+                info = ticker.get_info()
+                price = info.get("currentPrice") or info.get("regularMarketPrice")
+            except:
+                info = {}
+
+        # 3. fallback -> history (EN GÜVENİLİR)
+        if not price:
+            hist = ticker.history(period="1d")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+
+        # Hâlâ yoksa veri gerçekten yok
+        if not price:
+            return None, "🚫 Fiyat verisi alınamadı (Yahoo BIST verisini boş döndürdü)."
+
+        # Finansallar (ayrı çekiyoruz çünkü bazen crash yapıyor)
+        try:
+            if 'info' not in locals():
+                info = ticker.get_info()
+        except:
+            info = {}
+
+        eps = info.get("trailingEps")
+        bvps = info.get("bookValue")
+        pe = info.get("trailingPE")
+        pb = info.get("priceToBook")
+
+        # Güvenli dönüşüm
+        eps = float(eps) if eps and eps > 0 else None
+        bvps = float(bvps) if bvps and bvps > 0 else None
 
         return {
             "symbol": ticker_symbol.upper(),
-            "price": info.get("currentPrice") or info.get("regularMarketPrice") or price,
-            "eps": info.get("trailingEps"),
-            "book_value_ps": info.get("bookValue"),
-            "pe": info.get("trailingPE"),
-            "pb": info.get("priceToBook")
+            "price": float(price),
+            "eps": eps,
+            "book_value_ps": bvps,
+            "pe": pe,
+            "pb": pb
         }, None
+
     except Exception as e:
         return None, f"Veri Hatası: {str(e)}"
 
+
 def calculate_graham(eps, bvps):
-    if eps and bvps and eps > 0 and bvps > 0:
+    """Graham Intrinsic Value (defensive safe)"""
+    try:
+        if eps is None or bvps is None:
+            return None
+        if eps <= 0 or bvps <= 0:
+            return None
         return math.sqrt(22.5 * eps * bvps)
-    return None
+    except:
+        return None
+
+
+def format_number(val):
+    """None güvenli format"""
+    if val is None:
+        return "N/A"
+    return f"{val:.2f}"
+
 
 # --- ARAYÜZ ---
 st.title("🛡️ Kurgan AI: BIST Değerleme & Tarama")
+st.caption("Profesyonel Graham Değerleme Terminali")
 
-# Sekmeleri Oluşturma
+# Sekmeler
 tab1, tab2 = st.tabs(["🔍 Tekli Hisse Analizi", "📊 BIST 30 Ucuzluk Taraması"])
 
-# --- SEKME 1: TEKLİ ANALİZ ---
+# --- SEKME 1 ---
 with tab1:
-    st.subheader("Nokta Atışı Analiz")
-    ticker_input = st.text_input("Hisse Kodu Giriniz (Örn: EREGL, THYAO):", value="EREGL", key="single")
-    if st.button("Analiz Et", key="btn_single"):
-        data, err = fetch_financial_data(ticker_input)
+    st.subheader("Nokta Atışı Hisse Analizi")
+
+    ticker_input = st.text_input(
+        "Hisse Kodu Giriniz (Örn: EREGL, THYAO):",
+        value="EREGL"
+    )
+
+    if st.button("Analiz Et", type="primary"):
+        with st.spinner("Veri çekiliyor..."):
+            data, err = fetch_financial_data(ticker_input)
+
         if err:
             st.warning(err)
-            if not data: # Veri tamamen boşsa devam etme
-                st.stop()
-        
-        # Veri varsa (veya kısıtlıysa) devam et
-        graham_val = calculate_graham(data["eps"], data["book_value_ps"])
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Güncel Fiyat", f"{data['price']} TL")
-        c2.metric("Hisse Başı Kar (EPS)", f"{data['eps']:.2f}" if data['eps'] else "N/A")
-        c3.metric("Defter Değeri (BVPS)", f"{data['book_value_ps']:.2f}" if data['book_value_ps'] else "N/A")
+
+        if not data:
+            st.stop()
+
+        graham_val = calculate_graham(
+            data["eps"],
+            data["book_value_ps"]
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        col1.metric("💰 Güncel Fiyat", format_number(data["price"]) + " TL")
+        col2.metric("📊 EPS", format_number(data["eps"]))
+        col3.metric("📚 BVPS", format_number(data["book_value_ps"]))
+        col4.metric("📉 F/K", format_number(data["pe"]))
+
+        st.divider()
 
         if graham_val:
-            iskonto = ((graham_val - data['price']) / graham_val) * 100
-            st.divider()
-            res_c1, res_c2 = st.columns(2)
-            res_c1.metric("Graham İçsel Değeri", f"{graham_val:.2f} TL", f"%{iskonto:.2f} İskonto")
-            if iskonto > 0:
-                st.success(f"Bu hisse Graham modeline göre %{iskonto:.2f} oranında **İSKONTOLU** görünmektedir.")
-            else:
-                st.warning(f"Bu hisse Graham modeline göre %{abs(iskonto):.2f} oranında **PRİMLİ** (pahalı) görünmektedir.")
-        else:
-            st.error("Graham Değeri hesaplanamadı (Kâr veya Özsermaye negatif olabilir veya Yahoo veri vermiyor).")
+            iskonto = ((graham_val - data["price"]) / graham_val) * 100
 
-# --- SEKME 2: TOPLU TARAMA ---
+            r1, r2 = st.columns(2)
+            r1.metric(
+                "🧠 Graham İçsel Değeri",
+                f"{graham_val:.2f} TL"
+            )
+            r2.metric(
+                "📊 İskonto Oranı",
+                f"%{iskonto:.2f}"
+            )
+
+            if iskonto > 30:
+                st.success("🟢 Çok Ucuz (Deep Value)")
+            elif iskonto > 0:
+                st.info("🟡 İskontolu (Undervalued)")
+            else:
+                st.error("🔴 Pahalı (Overvalued)")
+        else:
+            st.error(
+                "Graham hesaplanamadı. (EPS veya Defter Değeri negatif / veri yok)"
+            )
+
+# --- SEKME 2 ---
 with tab2:
-    st.subheader("BIST 30 İçindeki En Ucuz Hisseleri Bul")
-    st.write("Bu işlem seçili hisselerin verilerini tek tek analiz eder.")
-    
-    bist30_list = ["AKBNK", "ARCLK", "ASELS", "BIMAS", "EKGYO", "ENKAI", "EREGL", "FROTO", "GARAN", "GUBRF", "HALKB", "HEKTS", "ISCTR", "KCHOL", "KOZAA", "KOZAL", "KRDMD", "PETKM", "PGSUS", "SAHOL", "SASA", "SISE", "TAVHL", "TCELL", "THYAO", "TKFEN", "TOASO", "TUPRS", "VAKBN", "YKBNK"]
-    
-    if st.button("Taramayı Başlat"):
+    st.subheader("BIST 30 Graham Ucuzluk Taraması")
+
+    bist30_list = [
+        "AKBNK", "ARCLK", "ASELS", "BIMAS", "EKGYO", "ENKAI", "EREGL",
+        "FROTO", "GARAN", "GUBRF", "HALKB", "HEKTS", "ISCTR", "KCHOL",
+        "KOZAA", "KOZAL", "KRDMD", "PETKM", "PGSUS", "SAHOL", "SASA",
+        "SISE", "TAVHL", "TCELL", "THYAO", "TKFEN", "TOASO", "TUPRS",
+        "VAKBN", "YKBNK"
+    ]
+
+    if st.button("🚀 Taramayı Başlat"):
         results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, s in enumerate(bist30_list):
-            status_text.text(f"Analiz ediliyor: {s}")
-            data, _ = fetch_financial_data(s)
-            if data and data["eps"] and data["book_value_ps"]:
-                gv = calculate_graham(data["eps"], data["book_value_ps"])
-                if gv:
+        progress = st.progress(0)
+        status = st.empty()
+
+        for i, symbol in enumerate(bist30_list):
+            status.text(f"Analiz ediliyor: {symbol}")
+
+            data, _ = fetch_financial_data(symbol)
+
+            if data:
+                gv = calculate_graham(
+                    data["eps"],
+                    data["book_value_ps"]
+                )
+
+                if gv and data["price"]:
                     iskonto = ((gv - data["price"]) / gv) * 100
+
                     results.append({
-                        "Hisse": s,
-                        "Fiyat": data["price"],
+                        "Hisse": symbol,
+                        "Fiyat (TL)": round(data["price"], 2),
                         "Graham Değeri": round(gv, 2),
-                        "İskonto (%)": round(iskonto, 2)
+                        "İskonto (%)": round(iskonto, 2),
+                        "F/K": data["pe"]
                     })
-            progress_bar.progress((idx + 1) / len(bist30_list))
-            time.sleep(0.05) # Yahoo'yu yormamak için çok kısa bekleme
-        
-        status_text.text("Analiz Tamamlandı!")
+
+            progress.progress((i + 1) / len(bist30_list))
+            time.sleep(0.1)  # Rate limit koruma
+
+        status.text("Analiz Tamamlandı!")
+
         if results:
             df = pd.DataFrame(results)
-            df_sorted = df.sort_values(by="İskonto (%)", ascending=False)
-            st.dataframe(df_sorted, use_container_width=True)
-            st.info("💡 Not: İskonto oranı en yüksek olan hisseler, Graham modeline göre potansiyeli en yüksek olanlardır.")
+            df = df.sort_values(by="İskonto (%)", ascending=False)
+            st.dataframe(df, use_container_width=True)
+
+            st.success("En üstteki hisseler Graham modeline göre en ucuz olanlardır.")
         else:
-            st.error("Hiçbir hisse için veri çekilemedi. Lütfen bir süre sonra tekrar deneyin.")
-# --- SAYFA ALTI (SIDEBAR) ---
+            st.error("Veri çekilemedi. Yahoo Finance rate limit olabilir.")
+
+# --- SIDEBAR ---
 st.sidebar.markdown("---")
-st.sidebar.write("🚀 **Geliştirici:**Dr. Yasin Cihan")
-st.sidebar.caption("Kurgan AI v1.0 | © 2026")
-st.sidebar.info("Bu uygulama eğitim amacıyla geliştirilmiştir. Yanlışlıklar ve hatalar olabilir lütfen bu uygulamaya güvenerek yatırım kararı almayınız")
+st.sidebar.write("🚀 **Geliştirici:** Dr. Yasin Cihan")
+st.sidebar.caption("Kurgan AI v2.0 | © 2026")
+st.sidebar.info(
+    "Bu uygulama eğitim amaçlıdır. Yatırım tavsiyesi değildir."
+)
