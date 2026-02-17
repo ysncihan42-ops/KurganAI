@@ -1,8 +1,7 @@
 import streamlit as st
 import yfinance as yf
-import pandas as pd
-import math
-import time
+# ... diğerleri ...
+import requests # Bu kütüphane bazen kimlik doğrulamada işe yarar
 
 # --- KONFİGÜRASYON ---
 st.set_page_config(page_title="Kurgan AI - Finansal Terminal", layout="wide")
@@ -10,29 +9,34 @@ st.set_page_config(page_title="Kurgan AI - Finansal Terminal", layout="wide")
 # --- VERİ ÇEKME FONKSİYONLARI ---
 def fetch_financial_data(ticker_symbol):
     ticker_id = f"{ticker_symbol.upper()}.IS"
-    ticker = yf.Ticker(ticker_id)
+    
+    # SUNUCU ENGELİNİ AŞMAK İÇİN ÖZEL AYAR (SESSION)
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    
+    ticker = yf.Ticker(ticker_id, session=session)
     
     try:
-        # Sunucu engellerini aşmak için info çekmeyi deniyoruz
+        # Önce hızlı veriyi deneyelim (Sunucuda daha az takılır)
+        fast = ticker.fast_info
+        price = fast.get('last_price')
+        
+        # Detaylı info'yu çekmeye çalışalım
         info = ticker.info
         
-        # Eğer Yahoo sunucuya veri vermeyi reddederse 'info' boş veya çok kısa döner
         if not info or len(info) < 5:
-            # Alternatif yöntem: En azından güncel fiyatı çekmeye çalış
-            fast_price = ticker.fast_info.get('last_price')
-            if fast_price:
+            if price: # Fiyat varsa ama diğerleri yoksa hata verme, kısıtlı göster
                 return {
                     "symbol": ticker_symbol.upper(),
-                    "price": fast_price,
-                    "eps": 1.0, # Hata vermemesi için geçici değer
-                    "book_value_ps": 1.0,
+                    "price": price,
+                    "eps": 0.0,
+                    "book_value_ps": 0.0,
                     "pe": 0,
                     "pb": 0
-                }, "⚠️ Yahoo Finance sunucu limitine takıldı. Bazı veriler eksik olabilir."
+                }, "⚠️ Yahoo sunucu yoğunluğu nedeniyle sadece fiyat çekilebildi."
             
-            return None, "Yahoo şu an veri vermiyor. Lütfen 30 saniye sonra tekrar deneyin."
+            return None, "🚫 Yahoo şu an çok yoğun. Lütfen 1-2 dakika bekleyip tekrar deneyin."
 
-        # Veri geldiyse normal işleme devam et
         return {
             "symbol": ticker_symbol.upper(),
             "price": info.get("currentPrice") or info.get("regularMarketPrice"),
@@ -42,7 +46,7 @@ def fetch_financial_data(ticker_symbol):
             "pb": info.get("priceToBook")
         }, None
     except Exception as e:
-        return None, f"Teknik Hata: {str(e)}"
+        return None, f"Hata: {str(e)}"
 
 def calculate_graham(eps, bvps):
     if eps and bvps and eps > 0 and bvps > 0:
