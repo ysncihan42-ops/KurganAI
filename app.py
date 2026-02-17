@@ -10,22 +10,20 @@ st.set_page_config(page_title="Kurgan AI - Finansal Terminal", layout="wide")
 def fetch_financial_data(ticker_symbol):
     ticker_id = f"{ticker_symbol.upper()}.IS"
     
-    # SUNUCU ENGELİNİ AŞMAK İÇİN ÖZEL AYAR (SESSION)
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
-    
-    ticker = yf.Ticker(ticker_id, session=session)
+    # Yeni yfinance sürümünde artık session tanımlamamıza gerek yok.
+    # Kütüphane curl_cffi yüklüyse kendisi otomatik hallediyor.
+    ticker = yf.Ticker(ticker_id)
     
     try:
-        # Önce hızlı veriyi deneyelim (Sunucuda daha az takılır)
+        # En hızlı veri alma yöntemi 'fast_info'dur
         fast = ticker.fast_info
         price = fast.get('last_price')
         
-        # Detaylı info'yu çekmeye çalışalım
+        # Finansal veriler (EPS, Defter Değeri vb.) için info'yu deneyelim
         info = ticker.info
         
         if not info or len(info) < 5:
-            if price: # Fiyat varsa ama diğerleri yoksa hata verme, kısıtlı göster
+            if price:
                 return {
                     "symbol": ticker_symbol.upper(),
                     "price": price,
@@ -33,20 +31,20 @@ def fetch_financial_data(ticker_symbol):
                     "book_value_ps": 0.0,
                     "pe": 0,
                     "pb": 0
-                }, "⚠️ Yahoo sunucu yoğunluğu nedeniyle sadece fiyat çekilebildi."
+                }, "⚠️ Yahoo bazı verileri kısıtlı gönderiyor. Fiyat günceldir."
             
-            return None, "🚫 Yahoo şu an çok yoğun. Lütfen 1-2 dakika bekleyip tekrar deneyin."
+            return None, "🚫 Şu an veri çekilemiyor. Lütfen birkaç dakika sonra deneyin."
 
         return {
             "symbol": ticker_symbol.upper(),
-            "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            "price": info.get("currentPrice") or info.get("regularMarketPrice") or price,
             "eps": info.get("trailingEps"),
             "book_value_ps": info.get("bookValue"),
             "pe": info.get("trailingPE"),
             "pb": info.get("priceToBook")
         }, None
     except Exception as e:
-        return None, f"Hata: {str(e)}"
+        return None, f"Veri Hatası: {str(e)}"
 
 def calculate_graham(eps, bvps):
     if eps and bvps and eps > 0 and bvps > 0:
