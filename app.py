@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import math
 import time
+import requests
 
 # --- KONFİGÜRASYON ---
 st.set_page_config(
@@ -17,7 +18,14 @@ def fetch_financial_data(ticker_symbol):
     ticker_id = f"{ticker_symbol.upper()}.IS"
 
     try:
-        ticker = yf.Ticker(ticker_id)
+        # YENİ EKLENEN KISIM: Yahoo Finance'i kandırmak için "Ben Chrome Tarayıcısıyım" diyoruz.
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        
+        # Ticker'ı bu özel oturumla çağırıyoruz
+        ticker = yf.Ticker(ticker_id, session=session)
 
         # Fiyat Çekimi
         price = None
